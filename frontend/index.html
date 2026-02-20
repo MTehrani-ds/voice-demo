@@ -44,7 +44,7 @@
       <h3>1) Voice</h3>
       <div style="display:flex; gap:10px; flex-wrap:wrap;">
         <button id="btnStart" class="primary">🎙 Start Listening</button>
-        <button id="btnStop">⏹ Stop</button>
+        <button id="btnStop" disabled>⏹ Stop</button>
         <button id="btnReset">🔄 Reset Session</button>
       </div>
 
@@ -53,7 +53,7 @@
           <div>
             <label class="small muted">Language</label>
             <select id="lang">
-              <option value="de-DE">German (de-DE)</option>
+              <option value="de-DE" selected>German (de-DE)</option>
               <option value="en-US">English (en-US)</option>
             </select>
           </div>
@@ -255,7 +255,10 @@ document.getElementById("btnFinalize").onclick = () => {
   summaryEl.value = s.text;
   setUrgencyPill(s.urgency);
   addMsg("ASSISTANT", "Here is the structured doctor summary on screen. I can forward this to the dentist.");
-  speak("Danke. Ich habe die Informationen zusammengefasst. Bitte schauen Sie die Zusammenfassung auf dem Bildschirm an.");
+  speak(langEl.value.startsWith("de")
+    ? "Danke. Ich habe die Informationen zusammengefasst. Bitte schauen Sie die Zusammenfassung auf dem Bildschirm an."
+    : "Thank you. I have summarized the information. Please review the summary on the screen."
+  );
 };
 
 // --- Intake logic (finite state)
@@ -268,10 +271,13 @@ function resetSession() {
   summaryEl.value = "";
   setUrgencyPill("green");
 
-  // Start with greeting
-  assistantSay(getText("greeting"));
-  assistantSay(getText("consent"));
-  assistantAsk(nextQuestion());
+  // Speak ONLY ONCE at start (opening message), then ask first question
+  // Small delay helps Chrome load voices reliably.
+  setTimeout(() => {
+    assistantSay(getText("opening"));
+    assistantAsk(getText("ask_reason"));
+    state.step = "ASK_REASON"; // set explicitly
+  }, 200);
 }
 
 function assistantSay(text) {
@@ -286,8 +292,7 @@ function assistantAsk(q) {
 
 function getText(key) {
   const de = {
-    greeting: "Hallo! Ich bin die digitale Rezeption. Ich stelle ein paar kurze Fragen und leite die Infos an die Zahnarztpraxis weiter.",
-    consent: "Hinweis: Ich kann keine medizinische Beratung geben. Wir speichern keine Audioaufnahmen. Ist das okay?",
+    opening: "Hallo! Ich bin die digitale Rezeption. Ich stelle ein paar kurze Fragen und leite die Infos an die Zahnarztpraxis weiter. Hinweis: Ich kann keine medizinische Beratung geben. Ist das okay?",
     ask_reason: "Was ist der Grund für Ihren Besuch? Zum Beispiel: starke Schmerzen, Implantat-Problem, Kontrolle oder Reinigung.",
     ask_name: "Wie ist Ihr Name?",
     ask_phone: "Wie ist Ihre Telefonnummer?",
@@ -303,8 +308,7 @@ function getText(key) {
   };
 
   const en = {
-    greeting: "Hello! I’m the digital receptionist. I’ll ask a few quick questions and pass the information to the clinic.",
-    consent: "Note: I cannot provide medical advice. We don’t store audio recordings. Is that okay?",
+    opening: "Hello! I’m the digital receptionist. I’ll ask a few quick questions and pass the information to the clinic. Note: I can’t provide medical advice. Is that okay?",
     ask_reason: "What’s the reason for your visit? For example: severe pain, implant issue, checkup, or cleaning.",
     ask_name: "What is your name?",
     ask_phone: "What is your phone number?",
@@ -379,13 +383,6 @@ function handleUserUtterance(text) {
 
   // Step-specific parsing
   switch (state.step) {
-    case "ASK_CONSENT": {
-      const yn = parseYesNo(text);
-      // even if unclear, proceed in demo mode
-      state.step = "ASK_REASON";
-      break;
-    }
-
     case "ASK_REASON": {
       const intent = detectIntent(text);
       state.intent = intent || "pain"; // default to pain path for demo
@@ -474,21 +471,13 @@ function handleUserUtterance(text) {
 }
 
 function nextQuestion() {
-  // Initial greeting flow
-  if (state.step === "GREETING") {
-    state.step = "ASK_CONSENT";
-    return null; // greeting already spoken in resetSession()
-  }
-  if (state.step === "ASK_CONSENT") return getText("ask_reason"); // we don’t block on consent in demo
-
-  if (state.step === "ASK_REASON") return getText("ask_reason");
   if (state.step === "ASK_NAME") return getText("ask_name");
   if (state.step === "ASK_PHONE") return getText("ask_phone");
 
   // Intent flow starter
   if (state.step === "INTENT_FLOW") {
     if (state.intent === "implant") { state.step = "IMPLANT_WHEN"; return getText("implant_when"); }
-    if (state.intent === "checkup") { state.step = "CHECKUP_DONE"; return "Great. We’ll arrange a suitable appointment. Any preferred time?"; }
+    if (state.intent === "checkup") { state.step = "CHECKUP_DONE"; return (langEl.value.startsWith("de") ? "Super. Haben Sie eine bevorzugte Uhrzeit oder einen bevorzugten Tag?" : "Great. Do you have a preferred day or time?"); }
     // default pain
     state.step = "PAIN_SCALE";
     return getText("pain_scale");
@@ -506,8 +495,13 @@ function nextQuestion() {
   if (state.step === "IMPLANT_LOOSE") return getText("implant_loose");
   if (state.step === "BLEEDING") return getText("bleeding");
 
-  // Checkup path
-  if (state.step === "CHECKUP_DONE") return "Thanks. Please confirm your phone number again for a callback.";
+  // Checkup path end
+  if (state.step === "CHECKUP_DONE") {
+    return (langEl.value.startsWith("de")
+      ? "Danke. Bitte bestätigen Sie noch einmal Ihre Telefonnummer für den Rückruf."
+      : "Thanks. Please confirm your phone number again for a callback."
+    );
+  }
 
   // Done
   if (state.step === "DONE") return null;
@@ -517,10 +511,8 @@ function nextQuestion() {
 
 // --- Urgency rules (simple + deterministic)
 function computeUrgency() {
-  // Default green
   let level = "green";
 
-  // Red if: fever yes AND swelling yes, or pain >= 8, or bleeding yes
   const pain = state.collected.pain_scale;
   const swelling = (state.collected.swelling || "").toString().toLowerCase();
   const fever = (state.collected.fever || "").toString().toLowerCase();
