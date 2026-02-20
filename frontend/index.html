@@ -1,0 +1,592 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Voice Receptionist Demo (Option A)</title>
+  <style>
+    body { font-family: system-ui, Arial; margin: 24px; max-width: 980px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .card { border: 1px solid #ddd; border-radius: 12px; padding: 14px; }
+    .muted { color: #666; }
+    .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; border: 1px solid #ccc; font-size: 12px; }
+    .pill.green { background: #eaffea; border-color: #8dd98d; }
+    .pill.yellow { background: #fff7da; border-color: #e7c34e; }
+    .pill.red { background: #ffe3e3; border-color: #e58b8b; }
+    button { padding: 10px 12px; border-radius: 10px; border: 1px solid #ccc; cursor: pointer; }
+    button.primary { border-color: #999; font-weight: 600; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    textarea { width: 100%; min-height: 120px; border-radius: 10px; border: 1px solid #ddd; padding: 10px; }
+    .log { max-height: 360px; overflow: auto; border-radius: 10px; border: 1px solid #eee; padding: 10px; background: #fafafa; }
+    .msg { margin: 10px 0; }
+    .msg .who { font-weight: 700; font-size: 12px; }
+    .msg .txt { white-space: pre-wrap; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    input, select { width: 100%; padding: 10px; border-radius: 10px; border: 1px solid #ddd; }
+    .small { font-size: 12px; }
+    .warn { background: #fff7f7; border: 1px solid #f1c1c1; padding: 10px; border-radius: 10px; }
+  </style>
+</head>
+<body>
+  <h2>Browser Voice Receptionist — Option A (Rules + Free STT/TTS)</h2>
+  <p class="muted">
+    Safety: This demo collects info only. It does not provide medical advice.
+    <span class="pill">Push-to-talk</span>
+    <span class="pill">No audio stored</span>
+  </p>
+
+  <div class="warn small">
+    <b>Note:</b> Web Speech API works best in Chrome/Edge. Speech recognition often requires <b>HTTPS</b> (localhost is OK).
+  </div>
+
+  <div class="row" style="margin-top:16px;">
+    <div class="card">
+      <h3>1) Voice</h3>
+      <div style="display:flex; gap:10px; flex-wrap:wrap;">
+        <button id="btnStart" class="primary">🎙 Start Listening</button>
+        <button id="btnStop">⏹ Stop</button>
+        <button id="btnReset">🔄 Reset Session</button>
+      </div>
+
+      <div style="margin-top:12px;">
+        <div class="grid2">
+          <div>
+            <label class="small muted">Language</label>
+            <select id="lang">
+              <option value="de-DE">German (de-DE)</option>
+              <option value="en-US">English (en-US)</option>
+            </select>
+          </div>
+          <div>
+            <label class="small muted">Voice Output</label>
+            <select id="voiceSelect"></select>
+          </div>
+        </div>
+      </div>
+
+      <div style="margin-top:12px;">
+        <label class="small muted">Live transcript</label>
+        <textarea id="liveTranscript" placeholder="You'll see live text here..." readonly></textarea>
+      </div>
+
+      <p class="small muted" style="margin-top:10px;">
+        Tip: Speak, then press Stop. The assistant will parse what you said and continue with the next question.
+      </p>
+    </div>
+
+    <div class="card">
+      <h3>2) Doctor Summary</h3>
+      <div style="display:flex; align-items:center; gap:10px;">
+        <span class="small muted">Urgency:</span>
+        <span id="urgencyPill" class="pill green">GREEN</span>
+      </div>
+      <div style="margin-top:10px;">
+        <label class="small muted">Structured summary</label>
+        <textarea id="summaryBox" readonly></textarea>
+      </div>
+      <div style="margin-top:10px;">
+        <button id="btnFinalize" class="primary">✅ Finalize Summary</button>
+      </div>
+      <p class="small muted">You can demo this screen to clinics as the “handover” to the dentist.</p>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px;">
+    <h3>Conversation</h3>
+    <div id="log" class="log"></div>
+  </div>
+
+<script>
+/** ---------------------------
+ *  Option A: Rules + State Machine
+ *  --------------------------- */
+
+const state = {
+  step: "GREETING",
+  intent: null, // "pain" | "implant" | "checkup"
+  collected: {
+    name: null,
+    phone: null,
+    reason: null,
+    pain_scale: null,
+    pain_duration: null,
+    swelling: null,
+    fever: null,
+    meds: null,
+    implant_when: null,
+    implant_loose: null,
+    bleeding: null
+  },
+  transcript_history: []
+};
+
+// --- UI refs
+const logEl = document.getElementById("log");
+const liveEl = document.getElementById("liveTranscript");
+const summaryEl = document.getElementById("summaryBox");
+const urgencyPillEl = document.getElementById("urgencyPill");
+const langEl = document.getElementById("lang");
+const voiceSelectEl = document.getElementById("voiceSelect");
+
+function addMsg(who, txt) {
+  const div = document.createElement("div");
+  div.className = "msg";
+  div.innerHTML = `<div class="who">${who}</div><div class="txt">${escapeHtml(txt)}</div>`;
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function escapeHtml(str) {
+  return (str ?? "").replace(/[&<>"']/g, (m) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;" }[m]));
+}
+
+// --- TTS
+let voices = [];
+function loadVoices() {
+  voices = window.speechSynthesis.getVoices() || [];
+  voiceSelectEl.innerHTML = "";
+  voices.forEach((v, idx) => {
+    const opt = document.createElement("option");
+    opt.value = String(idx);
+    opt.textContent = `${v.name} (${v.lang})`;
+    voiceSelectEl.appendChild(opt);
+  });
+
+  // Choose best match for selected language
+  const targetLang = langEl.value;
+  const matchIdx = voices.findIndex(v => (v.lang || "").toLowerCase() === targetLang.toLowerCase());
+  if (matchIdx >= 0) voiceSelectEl.value = String(matchIdx);
+}
+window.speechSynthesis.onvoiceschanged = loadVoices;
+loadVoices();
+
+function speak(text) {
+  if (!text) return;
+  const utter = new SpeechSynthesisUtterance(text);
+  utter.lang = langEl.value;
+
+  const idx = parseInt(voiceSelectEl.value || "0", 10);
+  if (voices[idx]) utter.voice = voices[idx];
+
+  window.speechSynthesis.cancel(); // stop overlapping
+  window.speechSynthesis.speak(utter);
+}
+
+// --- STT (Web Speech API)
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null;
+let listening = false;
+let finalTextBuffer = "";
+
+function setupRecognition() {
+  if (!SpeechRecognition) {
+    addMsg("SYSTEM", "SpeechRecognition not supported in this browser. Use Chrome/Edge.");
+    return;
+  }
+  rec = new SpeechRecognition();
+  rec.lang = langEl.value;
+  rec.interimResults = true;
+  rec.continuous = false;
+
+  rec.onresult = (event) => {
+    let interim = "";
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const res = event.results[i];
+      const text = res[0].transcript;
+      if (res.isFinal) {
+        finalTextBuffer += text + " ";
+      } else {
+        interim += text;
+      }
+    }
+    liveEl.value = (finalTextBuffer + interim).trim();
+  };
+
+  rec.onend = () => {
+    listening = false;
+    document.getElementById("btnStart").disabled = false;
+    document.getElementById("btnStop").disabled = true;
+
+    const finalText = (finalTextBuffer || "").trim();
+    finalTextBuffer = "";
+    liveEl.value = "";
+
+    if (finalText) handleUserUtterance(finalText);
+  };
+
+  rec.onerror = (e) => {
+    listening = false;
+    addMsg("SYSTEM", `STT error: ${e.error || "unknown"}`);
+    document.getElementById("btnStart").disabled = false;
+    document.getElementById("btnStop").disabled = true;
+  };
+}
+
+langEl.addEventListener("change", () => {
+  if (rec) { try { rec.abort(); } catch {} }
+  setupRecognition();
+  loadVoices();
+});
+
+// Buttons
+document.getElementById("btnStart").onclick = () => {
+  if (!rec) setupRecognition();
+  if (!rec) return;
+
+  rec.lang = langEl.value;
+  finalTextBuffer = "";
+  listening = true;
+  document.getElementById("btnStart").disabled = true;
+  document.getElementById("btnStop").disabled = false;
+  rec.start();
+};
+
+document.getElementById("btnStop").onclick = () => {
+  if (!rec) return;
+  try { rec.stop(); } catch {}
+};
+
+document.getElementById("btnReset").onclick = () => {
+  resetSession();
+};
+
+document.getElementById("btnFinalize").onclick = () => {
+  const s = buildSummary();
+  summaryEl.value = s.text;
+  setUrgencyPill(s.urgency);
+  addMsg("ASSISTANT", "Here is the structured doctor summary on screen. I can forward this to the dentist.");
+  speak("Danke. Ich habe die Informationen zusammengefasst. Bitte schauen Sie die Zusammenfassung auf dem Bildschirm an.");
+};
+
+// --- Intake logic (finite state)
+function resetSession() {
+  state.step = "GREETING";
+  state.intent = null;
+  state.transcript_history = [];
+  for (const k of Object.keys(state.collected)) state.collected[k] = null;
+  logEl.innerHTML = "";
+  summaryEl.value = "";
+  setUrgencyPill("green");
+
+  // Start with greeting
+  assistantSay(getText("greeting"));
+  assistantSay(getText("consent"));
+  assistantAsk(nextQuestion());
+}
+
+function assistantSay(text) {
+  addMsg("ASSISTANT", text);
+  speak(text);
+}
+
+function assistantAsk(q) {
+  addMsg("ASSISTANT", q);
+  speak(q);
+}
+
+function getText(key) {
+  const de = {
+    greeting: "Hallo! Ich bin die digitale Rezeption. Ich stelle ein paar kurze Fragen und leite die Infos an die Zahnarztpraxis weiter.",
+    consent: "Hinweis: Ich kann keine medizinische Beratung geben. Wir speichern keine Audioaufnahmen. Ist das okay?",
+    ask_reason: "Was ist der Grund für Ihren Besuch? Zum Beispiel: starke Schmerzen, Implantat-Problem, Kontrolle oder Reinigung.",
+    ask_name: "Wie ist Ihr Name?",
+    ask_phone: "Wie ist Ihre Telefonnummer?",
+    pain_scale: "Wie stark sind die Schmerzen auf einer Skala von 0 bis 10?",
+    pain_duration: "Seit wann haben Sie die Schmerzen? Zum Beispiel: seit 2 Tagen oder seit einer Woche.",
+    swelling: "Haben Sie Schwellung im Gesicht oder am Zahnfleisch? Ja oder nein.",
+    fever: "Haben Sie Fieber? Ja oder nein.",
+    meds: "Haben Sie Schmerzmittel oder Antibiotika genommen? Wenn ja, welche?",
+    implant_when: "Wann wurde das Implantat gesetzt? Ungefähres Datum oder wie viele Monate/Jahre her.",
+    implant_loose: "Fühlt sich das Implantat oder die Krone locker an? Ja oder nein.",
+    bleeding: "Gibt es Blutung oder Eiter? Ja oder nein.",
+    confirm_done: "Danke. Das war’s. Ich habe alle Infos aufgenommen."
+  };
+
+  const en = {
+    greeting: "Hello! I’m the digital receptionist. I’ll ask a few quick questions and pass the information to the clinic.",
+    consent: "Note: I cannot provide medical advice. We don’t store audio recordings. Is that okay?",
+    ask_reason: "What’s the reason for your visit? For example: severe pain, implant issue, checkup, or cleaning.",
+    ask_name: "What is your name?",
+    ask_phone: "What is your phone number?",
+    pain_scale: "How strong is the pain on a scale from 0 to 10?",
+    pain_duration: "How long have you had the pain? For example: 2 days or 1 week.",
+    swelling: "Do you have swelling in the face or gums? Yes or no.",
+    fever: "Do you have fever? Yes or no.",
+    meds: "Have you taken painkillers or antibiotics? If yes, which ones?",
+    implant_when: "When was the implant placed? Approximate date or how many months/years ago.",
+    implant_loose: "Does the implant or crown feel loose? Yes or no.",
+    bleeding: "Is there bleeding or pus? Yes or no.",
+    confirm_done: "Thanks. That’s all. I’ve captured the information."
+  };
+
+  const dict = (langEl.value.startsWith("de")) ? de : en;
+  return dict[key] || key;
+}
+
+function detectIntent(text) {
+  const t = text.toLowerCase();
+  // German + English keywords
+  if (/(implant|krone locker|locker|abutment|schraube)/i.test(t)) return "implant";
+  if (/(schmerz|pain|toothache|weh|notfall|emergency)/i.test(t)) return "pain";
+  if (/(kontrolle|checkup|reinigung|cleaning|prophylaxe)/i.test(t)) return "checkup";
+  return null;
+}
+
+function parseYesNo(text) {
+  const t = text.toLowerCase().trim();
+  if (/(ja|yes|yep|genau|stimmt)/.test(t)) return true;
+  if (/(nein|no|nope|nicht)/.test(t)) return false;
+  return null;
+}
+
+function extractPhone(text) {
+  // simple: keep digits + leading +
+  const cleaned = text.replace(/[^\d+ ]/g, " ");
+  const m = cleaned.match(/(\+?\d[\d ]{7,}\d)/);
+  return m ? m[1].replace(/\s+/g, " ").trim() : null;
+}
+
+function extractName(text) {
+  // naive: if user says "Ich bin ..." or "My name is ..."
+  const m1 = text.match(/(?:ich bin|mein name ist)\s+([A-Za-zÀ-ÖØ-öø-ÿ\- ]{2,})/i);
+  const m2 = text.match(/(?:my name is|i am)\s+([A-Za-zÀ-ÖØ-öø-ÿ\- ]{2,})/i);
+  const raw = (m1 && m1[1]) || (m2 && m2[1]) || null;
+  if (!raw) return null;
+  return raw.trim().split(" ").slice(0, 4).join(" ");
+}
+
+function extractPainScale(text) {
+  const m = text.match(/\b(10|[0-9])\b/);
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  if (Number.isFinite(n) && n >= 0 && n <= 10) return n;
+  return null;
+}
+
+function handleUserUtterance(text) {
+  state.transcript_history.push(text);
+  addMsg("USER", text);
+
+  // Always try to fill name/phone opportunistically
+  if (!state.collected.phone) {
+    const ph = extractPhone(text);
+    if (ph) state.collected.phone = ph;
+  }
+  if (!state.collected.name) {
+    const nm = extractName(text);
+    if (nm) state.collected.name = nm;
+  }
+
+  // Step-specific parsing
+  switch (state.step) {
+    case "ASK_CONSENT": {
+      const yn = parseYesNo(text);
+      // even if unclear, proceed in demo mode
+      state.step = "ASK_REASON";
+      break;
+    }
+
+    case "ASK_REASON": {
+      const intent = detectIntent(text);
+      state.intent = intent || "pain"; // default to pain path for demo
+      state.collected.reason = text.trim();
+      state.step = "ASK_NAME";
+      break;
+    }
+
+    case "ASK_NAME": {
+      if (!state.collected.name) state.collected.name = text.trim();
+      state.step = "ASK_PHONE";
+      break;
+    }
+
+    case "ASK_PHONE": {
+      if (!state.collected.phone) state.collected.phone = text.trim();
+      state.step = "INTENT_FLOW";
+      break;
+    }
+
+    case "PAIN_SCALE": {
+      const n = extractPainScale(text);
+      if (n !== null) state.collected.pain_scale = n;
+      state.step = "PAIN_DURATION";
+      break;
+    }
+    case "PAIN_DURATION": {
+      state.collected.pain_duration = text.trim();
+      state.step = "SWELLING";
+      break;
+    }
+    case "SWELLING": {
+      const yn = parseYesNo(text);
+      state.collected.swelling = (yn === null) ? text.trim() : (yn ? "yes" : "no");
+      state.step = "FEVER";
+      break;
+    }
+    case "FEVER": {
+      const yn = parseYesNo(text);
+      state.collected.fever = (yn === null) ? text.trim() : (yn ? "yes" : "no");
+      state.step = "MEDS";
+      break;
+    }
+    case "MEDS": {
+      state.collected.meds = text.trim();
+      state.step = "DONE";
+      break;
+    }
+
+    case "IMPLANT_WHEN": {
+      state.collected.implant_when = text.trim();
+      state.step = "IMPLANT_LOOSE";
+      break;
+    }
+    case "IMPLANT_LOOSE": {
+      const yn = parseYesNo(text);
+      state.collected.implant_loose = (yn === null) ? text.trim() : (yn ? "yes" : "no");
+      state.step = "BLEEDING";
+      break;
+    }
+    case "BLEEDING": {
+      const yn = parseYesNo(text);
+      state.collected.bleeding = (yn === null) ? text.trim() : (yn ? "yes" : "no");
+      state.step = "DONE";
+      break;
+    }
+
+    case "CHECKUP_DONE": {
+      state.step = "DONE";
+      break;
+    }
+
+    default:
+      break;
+  }
+
+  // Ask next question (or finish)
+  const q = nextQuestion();
+  if (q) assistantAsk(q);
+  else {
+    assistantSay(getText("confirm_done"));
+    const s = buildSummary();
+    summaryEl.value = s.text;
+    setUrgencyPill(s.urgency);
+  }
+}
+
+function nextQuestion() {
+  // Initial greeting flow
+  if (state.step === "GREETING") {
+    state.step = "ASK_CONSENT";
+    return null; // greeting already spoken in resetSession()
+  }
+  if (state.step === "ASK_CONSENT") return getText("ask_reason"); // we don’t block on consent in demo
+
+  if (state.step === "ASK_REASON") return getText("ask_reason");
+  if (state.step === "ASK_NAME") return getText("ask_name");
+  if (state.step === "ASK_PHONE") return getText("ask_phone");
+
+  // Intent flow starter
+  if (state.step === "INTENT_FLOW") {
+    if (state.intent === "implant") { state.step = "IMPLANT_WHEN"; return getText("implant_when"); }
+    if (state.intent === "checkup") { state.step = "CHECKUP_DONE"; return "Great. We’ll arrange a suitable appointment. Any preferred time?"; }
+    // default pain
+    state.step = "PAIN_SCALE";
+    return getText("pain_scale");
+  }
+
+  // Pain path questions
+  if (state.step === "PAIN_SCALE") return getText("pain_scale");
+  if (state.step === "PAIN_DURATION") return getText("pain_duration");
+  if (state.step === "SWELLING") return getText("swelling");
+  if (state.step === "FEVER") return getText("fever");
+  if (state.step === "MEDS") return getText("meds");
+
+  // Implant path questions
+  if (state.step === "IMPLANT_WHEN") return getText("implant_when");
+  if (state.step === "IMPLANT_LOOSE") return getText("implant_loose");
+  if (state.step === "BLEEDING") return getText("bleeding");
+
+  // Checkup path
+  if (state.step === "CHECKUP_DONE") return "Thanks. Please confirm your phone number again for a callback.";
+
+  // Done
+  if (state.step === "DONE") return null;
+
+  return null;
+}
+
+// --- Urgency rules (simple + deterministic)
+function computeUrgency() {
+  // Default green
+  let level = "green";
+
+  // Red if: fever yes AND swelling yes, or pain >= 8, or bleeding yes
+  const pain = state.collected.pain_scale;
+  const swelling = (state.collected.swelling || "").toString().toLowerCase();
+  const fever = (state.collected.fever || "").toString().toLowerCase();
+  const bleeding = (state.collected.bleeding || "").toString().toLowerCase();
+  const loose = (state.collected.implant_loose || "").toString().toLowerCase();
+
+  const swellingYes = swelling.includes("yes") || swelling.includes("ja");
+  const feverYes = fever.includes("yes") || fever.includes("ja");
+  const bleedingYes = bleeding.includes("yes") || bleeding.includes("ja");
+  const looseYes = loose.includes("yes") || loose.includes("ja");
+
+  if ((swellingYes && feverYes) || (pain !== null && pain >= 8) || bleedingYes) return "red";
+  if (swellingYes || (pain !== null && pain >= 5) || looseYes) level = "yellow";
+
+  return level;
+}
+
+function setUrgencyPill(level) {
+  urgencyPillEl.classList.remove("green","yellow","red");
+  urgencyPillEl.classList.add(level);
+  urgencyPillEl.textContent = level.toUpperCase();
+}
+
+// --- Summary builder (local, no LLM needed)
+function buildSummary() {
+  const urgency = computeUrgency();
+  const c = state.collected;
+
+  const lines = [];
+  lines.push(`Patient: ${c.name || "—"} | Phone: ${c.phone || "—"}`);
+  lines.push(`Reason (raw): ${c.reason || "—"}`);
+  lines.push(`Intent: ${state.intent || "—"}`);
+  lines.push(`Urgency: ${urgency.toUpperCase()}`);
+
+  if (state.intent === "pain" || (!state.intent && c.pain_scale !== null)) {
+    lines.push("");
+    lines.push("Pain intake:");
+    lines.push(`- Pain scale: ${c.pain_scale ?? "—"}/10`);
+    lines.push(`- Duration: ${c.pain_duration || "—"}`);
+    lines.push(`- Swelling: ${c.swelling || "—"}`);
+    lines.push(`- Fever: ${c.fever || "—"}`);
+    lines.push(`- Meds taken: ${c.meds || "—"}`);
+  }
+
+  if (state.intent === "implant") {
+    lines.push("");
+    lines.push("Implant intake:");
+    lines.push(`- Implant placed: ${c.implant_when || "—"}`);
+    lines.push(`- Loose: ${c.implant_loose || "—"}`);
+    lines.push(`- Bleeding/pus: ${c.bleeding || "—"}`);
+  }
+
+  if (state.intent === "checkup") {
+    lines.push("");
+    lines.push("Checkup / Cleaning:");
+    lines.push("- Patient requests routine appointment.");
+  }
+
+  lines.push("");
+  lines.push("Safety note: This is not medical advice. Please triage clinically.");
+
+  return { urgency, text: lines.join("\n") };
+}
+
+// Boot
+resetSession();
+</script>
+</body>
+</html>
