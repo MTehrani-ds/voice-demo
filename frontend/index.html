@@ -160,15 +160,18 @@ function loadVoices() {
 window.speechSynthesis.onvoiceschanged = loadVoices;
 loadVoices();
 
-function speak(text) {
+function speak(text, { interrupt = false } = {}) {
   if (!text) return;
+
+  // Only cancel if we explicitly want to interrupt current speech
+  if (interrupt) window.speechSynthesis.cancel();
+
   const utter = new SpeechSynthesisUtterance(text);
   utter.lang = langEl.value;
 
   const idx = parseInt(voiceSelectEl.value || "0", 10);
   if (voices[idx]) utter.voice = voices[idx];
 
-  window.speechSynthesis.cancel(); // stop overlapping
   window.speechSynthesis.speak(utter);
 }
 
@@ -262,7 +265,7 @@ document.getElementById("btnFinalize").onclick = () => {
 };
 
 // --- Intake logic (finite state)
-function resetSession() {
+async function resetSession() {
   state.step = "GREETING";
   state.intent = null;
   state.transcript_history = [];
@@ -271,25 +274,44 @@ function resetSession() {
   summaryEl.value = "";
   setUrgencyPill("green");
 
-  // Speak ONLY ONCE at start (opening message), then ask first question
-  // Small delay helps Chrome load voices reliably.
-  setTimeout(() => {
-    assistantSay(getText("opening"));
-    assistantAsk(getText("ask_reason"));
-    state.step = "ASK_REASON"; // set explicitly
-  }, 200);
+  addMsg("ASSISTANT", getText("opening"));
+  addMsg("ASSISTANT", getText("ask_reason"));
+
+  // Speak in strict order:
+  await speakAsync(getText("opening"), { interrupt: true });
+  await speakAsync(getText("ask_reason"));
+
+  state.step = "ASK_REASON";
 }
 
 function assistantSay(text) {
   addMsg("ASSISTANT", text);
-  speak(text);
+  speak(text, { interrupt: false });
 }
 
 function assistantAsk(q) {
   addMsg("ASSISTANT", q);
-  speak(q);
+  speak(q, { interrupt: false });
 }
 
+function speakAsync(text, { interrupt = false } = {}) {
+  return new Promise((resolve) => {
+    if (!text) return resolve();
+
+    if (interrupt) window.speechSynthesis.cancel();
+
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.lang = langEl.value;
+
+    const idx = parseInt(voiceSelectEl.value || "0", 10);
+    if (voices[idx]) utter.voice = voices[idx];
+
+    utter.onend = resolve;
+    utter.onerror = resolve;
+
+    window.speechSynthesis.speak(utter);
+  });
+}
 function getText(key) {
   const de = {
     opening: "Hallo! Ich bin die digitale Rezeption. Ich stelle ein paar kurze Fragen und leite die Infos an die Zahnarztpraxis weiter. Hinweis: Ich kann keine medizinische Beratung geben. Ist das okay?",
