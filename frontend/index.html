@@ -8,25 +8,19 @@
     :root{
       --bg0:#070b16;
       --bg1:#0b1530;
-      --panel:#0e1e3e;
-      --panel2:#0c1933;
       --stroke:rgba(255,255,255,0.10);
       --stroke2:rgba(255,255,255,0.14);
       --text:rgba(255,255,255,0.92);
       --muted:rgba(255,255,255,0.62);
       --muted2:rgba(255,255,255,0.45);
-      --chip:rgba(255,255,255,0.08);
-      --chip2:rgba(255,255,255,0.12);
       --ok:#18d07b;
       --warn:#f4c84a;
       --bad:#ff6b6b;
       --blue:#4ea3ff;
       --shadow: 0 12px 30px rgba(0,0,0,0.35);
-      --r14:14px;
       --r18:18px;
       --r22:22px;
     }
-
     *{box-sizing:border-box;}
     body{
       margin:0;
@@ -39,8 +33,6 @@
       max-width: 1200px;
       margin: 0 auto;
     }
-
-    h1,h2,h3{margin:0;}
     .topbar{
       display:flex;
       gap:14px;
@@ -48,7 +40,7 @@
       justify-content:space-between;
       margin-bottom:16px;
     }
-    .titleBlock h2{font-size:20px; font-weight:900; letter-spacing:0.2px;}
+    .titleBlock h2{margin:0; font-size:20px; font-weight:900; letter-spacing:0.2px;}
     .titleBlock .sub{margin-top:6px; color:var(--muted); font-size:13px; line-height:1.4;}
     .chips{display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end;}
     .chip{
@@ -67,7 +59,6 @@
       gap:16px;
       align-items:start;
     }
-
     .col{display:flex; flex-direction:column; gap:16px;}
 
     .panel{
@@ -220,7 +211,7 @@
       padding:12px;
       background: rgba(0,0,0,0.12);
     }
-    .summaryBlock textarea{min-height:140px;}
+    .summaryBlock textarea{min-height:150px;}
 
     .banner{
       margin-top:10px;
@@ -318,14 +309,15 @@
     <div class="titleBlock">
       <h2>Voice Receptionist (Option A) — Demo Console</h2>
       <div class="sub">
-        Push-to-talk voice intake with rules-based flow + urgency flag + handover summary.
+        Push-to-talk voice intake with rules-based flow + urgency flag + calendar-referenced slot offering.
         <br/>No audio is stored. This demo does not provide medical advice.
       </div>
     </div>
     <div class="chips">
       <div class="chip">🎙 Browser STT</div>
       <div class="chip">🗣 Browser TTS</div>
-      <div class="chip">🛡️ Safe, rule-based</div>
+      <div class="chip">🗓️ Calendar demo</div>
+      <div class="chip">🛡️ Rule-based</div>
     </div>
   </div>
 
@@ -456,6 +448,7 @@
 const state = {
   step: "GREETING",
   intent: null, // "pain" | "implant" | "checkup"
+  proposed_slot: null, // {dateKey, time}
   collected: {
     name: null,
     phone: null,
@@ -485,6 +478,11 @@ const voiceSelectEl = document.getElementById("voiceSelect");
 const callStatusEl = document.getElementById("callStatus");
 const waveEl = document.getElementById("wave");
 const bookingBannerEl = document.getElementById("bookingBanner");
+
+const calGridEl = document.getElementById("calGrid");
+const calLabelEl = document.getElementById("calLabel");
+const slotListEl = document.getElementById("slotList");
+const selDayLabelEl = document.getElementById("selDayLabel");
 
 /** ===========================
  *  CHAT RENDER
@@ -539,7 +537,6 @@ function speak(text, { interrupt = false } = {}) {
 
   window.speechSynthesis.speak(utter);
 }
-
 function assistantSay(text) {
   addMsg("ASSISTANT", text);
   speak(text, { interrupt: false });
@@ -650,6 +647,9 @@ langEl.addEventListener("change", () => {
   if (rec) { try { rec.abort(); } catch {} }
   setupRecognition();
   loadVoices();
+  // Re-render calendar labels (language)
+  renderCalendar();
+  if (selectedDay) renderSlotsForDay(selectedDay);
 });
 
 /** ===========================
@@ -719,8 +719,8 @@ function detectIntent(text) {
 
 function parseYesNo(text) {
   const t = text.toLowerCase().trim();
-  if (/(ja|yes|yep|genau|stimmt)/.test(t)) return true;
-  if (/(nein|no|nope|nicht)/.test(t)) return false;
+  if (/(ja|yes|yep|genau|stimmt|ok|okay|bitte|mach|book|buchen)/.test(t)) return true;
+  if (/(nein|no|nope|nicht|lieber nicht|dont|don't)/.test(t)) return false;
   return null;
 }
 
@@ -747,11 +747,215 @@ function extractPainScale(text) {
 }
 
 /** ===========================
+ *  CALENDAR + BOOKING (DEMO)
+ *  =========================== */
+let viewDate = new Date();
+let selectedDay = null;
+
+// Demo availability map: YYYY-MM-DD -> slots
+const availability = new Map();
+// Track booked slots: "YYYY-MM-DD|HH:MM"
+const booked = new Set();
+
+function toKey(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth()+1).padStart(2,"0");
+  const da = String(d.getDate()).padStart(2,"0");
+  return `${y}-${m}-${da}`;
+}
+function isBooked(dateKey, timeStr){
+  return booked.has(`${dateKey}|${timeStr}`);
+}
+function markBooked(dateKey, timeStr){
+  booked.add(`${dateKey}|${timeStr}`);
+}
+
+// seed some demo slots
+function seedAvailability(){
+  availability.clear();
+  const base = new Date();
+  for (let i=2; i<=24; i+=3){
+    const d = new Date(base.getFullYear(), base.getMonth(), base.getDate() + i);
+    availability.set(toKey(d), ["09:30","10:15","11:00"]);
+  }
+}
+seedAvailability();
+
+function renderCalendar(){
+  calGridEl.innerHTML = "";
+  slotListEl.innerHTML = "";
+  selDayLabelEl.textContent = langEl.value.startsWith("de") ? "Tag auswählen" : "Select a day";
+
+  const y = viewDate.getFullYear();
+  const m = viewDate.getMonth();
+  calLabelEl.textContent = viewDate.toLocaleString(undefined, { month:"long", year:"numeric" });
+
+  const first = new Date(y, m, 1);
+  const startDay = (first.getDay() + 6) % 7; // Mon=0
+  const daysInMonth = new Date(y, m+1, 0).getDate();
+
+  for (let i=0; i<42; i++){
+    const cell = document.createElement("div");
+    cell.className = "day";
+    const dayNum = i - startDay + 1;
+
+    if (dayNum < 1 || dayNum > daysInMonth){
+      cell.classList.add("muted");
+      cell.textContent = "";
+      calGridEl.appendChild(cell);
+      continue;
+    }
+
+    const d = new Date(y, m, dayNum);
+    const key = toKey(d);
+    cell.textContent = String(dayNum);
+
+    if (availability.has(key)) cell.classList.add("hasSlot");
+    if (selectedDay && toKey(selectedDay) === key) cell.classList.add("selected");
+
+    cell.onclick = () => {
+      selectedDay = d;
+      renderCalendar();
+      renderSlotsForDay(d);
+    };
+
+    calGridEl.appendChild(cell);
+  }
+}
+
+function renderSlotsForDay(d){
+  slotListEl.innerHTML = "";
+  const key = toKey(d);
+  selDayLabelEl.textContent = d.toLocaleDateString(undefined, { weekday:"short", day:"2-digit", month:"short" });
+
+  const slots = availability.get(key) || [];
+  if (!slots.length){
+    const info = document.createElement("div");
+    info.style.color = "var(--muted)";
+    info.style.fontSize = "12px";
+    info.textContent = langEl.value.startsWith("de") ? "Keine Slots (Demo)." : "No slots (demo).";
+    slotListEl.appendChild(info);
+    return;
+  }
+
+  slots.forEach((t) => {
+    const s = document.createElement("div");
+    s.className = "slot";
+    s.textContent = t;
+
+    if (isBooked(key, t)) {
+      s.classList.add("booked");
+      s.style.opacity = "0.7";
+    }
+
+    s.onclick = () => {
+      if (isBooked(key, t)) return;
+      // manual demo-booking via UI
+      markBooked(key, t);
+      s.classList.add("booked");
+      bookingBannerEl.classList.remove("hidden");
+
+      addMsg("ASSISTANT",
+        langEl.value.startsWith("de")
+          ? `Gebucht (Demo): ${formatOffer(key, t)}. Bestätigung wurde gesendet.`
+          : `Booked (demo): ${formatOffer(key, t)}. Confirmation has been sent.`
+      );
+
+      speak(langEl.value.startsWith("de")
+        ? `Gebucht. ${d.toLocaleDateString("de-DE")} um ${t}.`
+        : `Booked. ${d.toLocaleDateString("en-US")} at ${t}.`,
+        { interrupt: true }
+      );
+    };
+
+    slotListEl.appendChild(s);
+  });
+}
+
+document.getElementById("prevMonth").onclick = () => {
+  viewDate = new Date(viewDate.getFullYear(), viewDate.getMonth()-1, 1);
+  renderCalendar();
+  if (selectedDay) renderSlotsForDay(selectedDay);
+};
+document.getElementById("nextMonth").onclick = () => {
+  viewDate = new Date(viewDate.getFullYear(), viewDate.getMonth()+1, 1);
+  renderCalendar();
+  if (selectedDay) renderSlotsForDay(selectedDay);
+};
+
+function formatOffer(dateKey, timeStr) {
+  const d = new Date(dateKey + "T00:00:00");
+  if (langEl.value.startsWith("de")) {
+    return `${d.toLocaleDateString("de-DE", { weekday:"long", day:"2-digit", month:"2-digit" })} um ${timeStr}`;
+  }
+  return `${d.toLocaleDateString("en-US", { weekday:"long", month:"short", day:"2-digit" })} at ${timeStr}`;
+}
+
+function findBestSlot(preferredText = "") {
+  const pref = (preferredText || "").toLowerCase();
+
+  // weekday hints
+  const weekdayHints = [
+    { keys: ["montag","monday","mo"], day: 1 },
+    { keys: ["dienstag","tuesday","di"], day: 2 },
+    { keys: ["mittwoch","wednesday","mi"], day: 3 },
+    { keys: ["donnerstag","thursday","do"], day: 4 },
+    { keys: ["freitag","friday","fr"], day: 5 },
+    { keys: ["samstag","saturday","sa"], day: 6 },
+    { keys: ["sonntag","sunday","so"], day: 0 },
+  ];
+
+  let preferredDow = null;
+  for (const w of weekdayHints) {
+    if (w.keys.some(k => pref.includes(k))) { preferredDow = w.day; break; }
+  }
+
+  const wantsMorning = /(morning|vormittag|morgens)/.test(pref);
+  const wantsAfternoon = /(afternoon|nachmittag)/.test(pref);
+
+  const keys = Array.from(availability.keys()).sort(); // YYYY-MM-DD sorts OK
+
+  let best = null;
+
+  // Try satisfy weekday + time
+  for (const dateKey of keys) {
+    const slots = availability.get(dateKey) || [];
+    const d = new Date(dateKey + "T00:00:00");
+    if (preferredDow !== null && d.getDay() !== preferredDow) continue;
+
+    for (const t of slots) {
+      if (isBooked(dateKey, t)) continue;
+
+      const hour = parseInt(t.split(":")[0], 10);
+      if (wantsMorning && hour >= 12) continue;
+      if (wantsAfternoon && hour < 12) continue;
+
+      best = { dateKey, time: t };
+      break;
+    }
+    if (best) break;
+  }
+
+  // fallback earliest
+  if (!best) {
+    for (const dateKey of keys) {
+      const slots = availability.get(dateKey) || [];
+      for (const t of slots) {
+        if (!isBooked(dateKey, t)) return { dateKey, time: t };
+      }
+    }
+  }
+
+  return best; // may be null
+}
+
+/** ===========================
  *  STATE MACHINE
  *  =========================== */
 function resetSession() {
   state.step = "GREETING";
   state.intent = null;
+  state.proposed_slot = null;
   state.transcript_history = [];
   for (const k of Object.keys(state.collected)) state.collected[k] = null;
 
@@ -760,12 +964,11 @@ function resetSession() {
   setUrgencyPill("green");
   bookingBannerEl.classList.add("hidden");
 
-  // IMPORTANT: speech often needs a user gesture. Reset is a gesture, so ok.
-  // We speak opening first, then question, without canceling in-between.
-  // Use interrupt=true once to clear any previous speech.
+  // Speak opening then reason question; do not cancel between them
   setTimeout(() => {
+    // Clear any prior speech once
+    speak("", { interrupt: true });
     assistantSay(getText("opening"));
-    // queue second speech (do NOT cancel)
     assistantAsk(getText("ask_reason"));
     state.step = "ASK_REASON";
   }, 80);
@@ -859,9 +1062,81 @@ function handleUserUtterance(text) {
       break;
     }
 
+    // ask appointment preferences -> propose slot from calendar
     case "PREFERRED_TIME": {
       state.collected.preferred_time = text.trim();
-      state.step = "DONE";
+
+      const best = findBestSlot(state.collected.preferred_time);
+      if (!best) {
+        state.step = "DONE";
+        assistantSay(langEl.value.startsWith("de")
+          ? "Leider habe ich gerade keine verfügbaren Zeiten im Demo-Kalender."
+          : "Unfortunately, there are no available slots in the demo calendar right now."
+        );
+        break;
+      }
+
+      state.proposed_slot = best;
+
+      // visually select proposed day and render slots
+      selectedDay = new Date(best.dateKey + "T00:00:00");
+      viewDate = new Date(selectedDay.getFullYear(), selectedDay.getMonth(), 1);
+      renderCalendar();
+      renderSlotsForDay(selectedDay);
+
+      state.step = "BOOK_CONFIRM";
+      break;
+    }
+
+    // confirm booking yes/no
+    case "BOOK_CONFIRM": {
+      const yn = parseYesNo(text);
+
+      if (yn === true && state.proposed_slot) {
+        const { dateKey, time } = state.proposed_slot;
+        markBooked(dateKey, time);
+
+        selectedDay = new Date(dateKey + "T00:00:00");
+        viewDate = new Date(selectedDay.getFullYear(), selectedDay.getMonth(), 1);
+        renderCalendar();
+        renderSlotsForDay(selectedDay);
+
+        bookingBannerEl.classList.remove("hidden");
+
+        assistantSay(langEl.value.startsWith("de")
+          ? `Gebucht (Demo): ${formatOffer(dateKey, time)}. Bestätigung wurde gesendet.`
+          : `Booked (demo): ${formatOffer(dateKey, time)}. Confirmation has been sent.`
+        );
+
+        state.step = "DONE";
+      } else if (yn === false) {
+        const next = findBestSlot(""); // earliest
+        if (next) {
+          state.proposed_slot = next;
+
+          selectedDay = new Date(next.dateKey + "T00:00:00");
+          viewDate = new Date(selectedDay.getFullYear(), selectedDay.getMonth(), 1);
+          renderCalendar();
+          renderSlotsForDay(selectedDay);
+
+          assistantAsk(langEl.value.startsWith("de")
+            ? `Okay. Dann kann ich ${formatOffer(next.dateKey, next.time)} anbieten. Soll ich buchen?`
+            : `Okay. Then I can offer ${formatOffer(next.dateKey, next.time)}. Should I book it?`
+          );
+          // stay in BOOK_CONFIRM
+        } else {
+          assistantSay(langEl.value.startsWith("de")
+            ? "Okay. Dann bitte rufen Sie die Praxis an, um einen Termin zu finden."
+            : "Okay. Please call the clinic to arrange a time."
+          );
+          state.step = "DONE";
+        }
+      } else {
+        assistantAsk(langEl.value.startsWith("de")
+          ? "Soll ich den Termin buchen? Bitte sagen Sie Ja oder Nein."
+          : "Should I book the appointment? Please say yes or no."
+        );
+      }
       break;
     }
 
@@ -872,10 +1147,14 @@ function handleUserUtterance(text) {
   const q = nextQuestion();
   if (q) assistantAsk(q);
   else {
-    assistantSay(getText("confirm_done"));
-    const s = buildSummary();
-    summaryEl.value = s.text;
-    setUrgencyPill(s.urgency);
+    // if done, close + show summary
+    if (state.step === "DONE") {
+      assistantSay(getText("confirm_done"));
+      const s = buildSummary();
+      summaryEl.value = s.text;
+      setUrgencyPill(s.urgency);
+      state.step = "DONE_FINAL";
+    }
   }
 }
 
@@ -885,12 +1164,7 @@ function nextQuestion() {
 
   if (state.step === "INTENT_FLOW") {
     if (state.intent === "implant") { state.step = "IMPLANT_WHEN"; return getText("implant_when"); }
-    if (state.intent === "checkup") {
-      state.step = "CHECKUP_DONE";
-      return langEl.value.startsWith("de")
-        ? "Super. Geht es um Kontrolle oder Reinigung?"
-        : "Great. Is this for a checkup or a cleaning?";
-    }
+    if (state.intent === "checkup") { state.step = "CHECKUP_DONE"; return langEl.value.startsWith("de") ? "Geht es um Kontrolle oder Reinigung?" : "Is this for a checkup or cleaning?"; }
     state.step = "PAIN_SCALE";
     return getText("pain_scale");
   }
@@ -907,15 +1181,22 @@ function nextQuestion() {
   if (state.step === "IMPLANT_LOOSE") return getText("implant_loose");
   if (state.step === "BLEEDING") return getText("bleeding");
 
-  // timing
+  // appointment preference
   if (state.step === "PREFERRED_TIME") return getText("preferred_time");
 
-  if (state.step === "DONE") return null;
+  // offer based on calendar
+  if (state.step === "BOOK_CONFIRM" && state.proposed_slot) {
+    const { dateKey, time } = state.proposed_slot;
+    return langEl.value.startsWith("de")
+      ? `Ich sehe im Kalender ${formatOffer(dateKey, time)} frei. Soll ich buchen?`
+      : `I see ${formatOffer(dateKey, time)} available in the calendar. Should I book it?`;
+  }
+
   return null;
 }
 
 /** ===========================
- *  URGENCY
+ *  URGENCY + SUMMARY
  *  =========================== */
 function computeUrgency() {
   let level = "green";
@@ -942,9 +1223,6 @@ function setUrgencyPill(level) {
   urgencyPillEl.textContent = level.toUpperCase();
 }
 
-/** ===========================
- *  SUMMARY
- *  =========================== */
 function buildSummary() {
   const urgency = computeUrgency();
   const c = state.collected;
@@ -981,127 +1259,15 @@ function buildSummary() {
 
   lines.push("");
   lines.push(`Preferred time: ${c.preferred_time || "—"}`);
+
+  if (state.proposed_slot) {
+    lines.push(`Proposed slot (calendar): ${formatOffer(state.proposed_slot.dateKey, state.proposed_slot.time)}`);
+  }
+
   lines.push("Safety note: This is not medical advice. Please triage clinically.");
 
   return { urgency, text: lines.join("\n") };
 }
-
-/** ===========================
- *  CALENDAR (DEMO BOOKING)
- *  =========================== */
-const calGridEl = document.getElementById("calGrid");
-const calLabelEl = document.getElementById("calLabel");
-const slotListEl = document.getElementById("slotList");
-const selDayLabelEl = document.getElementById("selDayLabel");
-
-let viewDate = new Date();
-let selectedDay = null;
-
-const availability = new Map(); // YYYY-MM-DD -> slots[]
-function toKey(d) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth()+1).padStart(2,"0");
-  const da = String(d.getDate()).padStart(2,"0");
-  return `${y}-${m}-${da}`;
-}
-function seedAvailability(){
-  availability.clear();
-  const base = new Date();
-  for (let i=2; i<=24; i+=3){
-    const d = new Date(base.getFullYear(), base.getMonth(), base.getDate() + i);
-    availability.set(toKey(d), ["09:30","10:15","11:00"]);
-  }
-}
-seedAvailability();
-
-function renderCalendar(){
-  calGridEl.innerHTML = "";
-  slotListEl.innerHTML = "";
-  selDayLabelEl.textContent = langEl.value.startsWith("de") ? "Tag auswählen" : "Select a day";
-
-  const y = viewDate.getFullYear();
-  const m = viewDate.getMonth();
-  calLabelEl.textContent = viewDate.toLocaleString(undefined, { month:"long", year:"numeric" });
-
-  const first = new Date(y, m, 1);
-  const startDay = (first.getDay() + 6) % 7; // Mon=0
-  const daysInMonth = new Date(y, m+1, 0).getDate();
-
-  for (let i=0; i<42; i++){
-    const cell = document.createElement("div");
-    cell.className = "day";
-    const dayNum = i - startDay + 1;
-
-    if (dayNum < 1 || dayNum > daysInMonth){
-      cell.classList.add("muted");
-      cell.textContent = "";
-      calGridEl.appendChild(cell);
-      continue;
-    }
-
-    const d = new Date(y, m, dayNum);
-    const key = toKey(d);
-    cell.textContent = String(dayNum);
-
-    if (availability.has(key)) cell.classList.add("hasSlot");
-    if (selectedDay && toKey(selectedDay) === key) cell.classList.add("selected");
-
-    cell.onclick = () => {
-      selectedDay = d;
-      renderCalendar();
-      renderSlotsForDay(d);
-    };
-
-    calGridEl.appendChild(cell);
-  }
-}
-function renderSlotsForDay(d){
-  slotListEl.innerHTML = "";
-  const key = toKey(d);
-  selDayLabelEl.textContent = d.toLocaleDateString(undefined, { weekday:"short", day:"2-digit", month:"short" });
-
-  const slots = availability.get(key) || [];
-  if (!slots.length){
-    const info = document.createElement("div");
-    info.style.color = "var(--muted)";
-    info.style.fontSize = "12px";
-    info.textContent = langEl.value.startsWith("de") ? "Keine Slots (Demo)." : "No slots (demo).";
-    slotListEl.appendChild(info);
-    return;
-  }
-
-  slots.forEach((t) => {
-    const s = document.createElement("div");
-    s.className = "slot";
-    s.textContent = t;
-    s.onclick = () => {
-      // mark booked (demo)
-      s.classList.add("booked");
-      bookingBannerEl.classList.remove("hidden");
-
-      addMsg("ASSISTANT",
-        langEl.value.startsWith("de")
-          ? `Gebucht (Demo): ${key} um ${t}. Bestätigung wurde gesendet.`
-          : `Booked (demo): ${key} at ${t}. Confirmation has been sent.`
-      );
-
-      speak(langEl.value.startsWith("de")
-        ? `Gebucht. ${d.toLocaleDateString("de-DE")} um ${t}.`
-        : `Booked. ${d.toLocaleDateString("en-US")} at ${t}.`,
-        { interrupt: true }
-      );
-    };
-    slotListEl.appendChild(s);
-  });
-}
-document.getElementById("prevMonth").onclick = () => {
-  viewDate = new Date(viewDate.getFullYear(), viewDate.getMonth()-1, 1);
-  renderCalendar();
-};
-document.getElementById("nextMonth").onclick = () => {
-  viewDate = new Date(viewDate.getFullYear(), viewDate.getMonth()+1, 1);
-  renderCalendar();
-};
 
 /** ===========================
  *  INIT
